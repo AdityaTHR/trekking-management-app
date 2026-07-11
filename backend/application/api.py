@@ -1,8 +1,54 @@
+from datetime import datetime
 from flask import current_app as app
-from .models import db, User, Role
+from .models import db, User, Role, StaffProfile, Trek, Booking
 from flask import request
 from flask_security import auth_required, roles_required, current_user
 from flask_security.utils import hash_password, verify_password
+
+
+# ---------------------------------------------------------------------------
+# Small serialization helpers (kept as plain functions, same flat style as
+# the reference app — no Marshmallow/serializer library introduced)
+# ---------------------------------------------------------------------------
+def trek_to_dict(trek):
+    return {
+        "id": trek.id,
+        "name": trek.name,
+        "location": trek.location,
+        "difficulty": trek.difficulty,
+        "duration": trek.duration,
+        "available_slots": trek.available_slots,
+        "start_date": trek.start_date.isoformat() if trek.start_date else None,
+        "end_date": trek.end_date.isoformat() if trek.end_date else None,
+        "status": trek.status,
+        "assigned_staff_id": trek.assigned_staff_id,
+        "assigned_staff_name": trek.assigned_staff.name if trek.assigned_staff else None,
+        "registered_count": sum(1 for b in trek.bookings if b.booking_status == "Booked"),
+    }
+
+
+def user_to_dict(user):
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "contact_number": user.contact_number,
+        "status": user.status,
+        "role": user.roles[0].name if user.roles else None,
+    }
+
+
+def booking_to_dict(b):
+    return {
+        "id": b.id,
+        "user_id": b.user_id,
+        "user_name": b.user.name,
+        "trek_id": b.trek_id,
+        "trek_name": b.trek.name,
+        "booking_date": b.booking_date.isoformat() if b.booking_date else None,
+        "booking_status": b.booking_status,
+        "payment_status": b.payment_status,
+    }
 
 
 @app.route("/")
@@ -10,6 +56,9 @@ def home():
     return "Trekking Management Application API"
 
 
+# ---------------------------------------------------------------------------
+# AUTH  (Milestone 2)
+# ---------------------------------------------------------------------------
 @app.route("/login", methods=["POST"])
 def login():
     email = request.json.get("email")
@@ -55,10 +104,6 @@ def register():
         return {"message": "Email Already Exists"}, 409
 
     # BETTERMENT over reference app: role is NEVER taken from client input.
-    # Only Trekkers may self-register — Admin creates Staff separately
-    # (Admin Dashboard milestone), and there is exactly one Admin (bootstrapped
-    # in initial_data.py). The reference app's register route trusted
-    # request.json.get("role"), which would let anyone register as staff.
     ds.create_user(
         name=name,
         email=email,
@@ -71,24 +116,508 @@ def register():
     return {"message": "Account created successfully"}, 200
 
 
-# Example protected route for this milestone — proves RBAC works end to end.
-# Full Admin Dashboard functionality comes in its own milestone.
+# ---------------------------------------------------------------------------
+# ADMIN — Dashboard & Stats  (Milestone 3)
+# ---------------------------------------------------------------------------
 @app.route("/admin/dashboard", methods=["GET"])
 @auth_required("token")
 @roles_required("admin")
 def admin_dashboard():
-    return {"message": f"Welcome to the admin dashboard, {current_user.name}"}
+    total_treks = Trek.query.count()
+    total_staff = User.query.join(User.roles).filter(Role.name == "staff").count()
+    total_users = User.query.join(User.roles).filter(Role.name == "trekker").count()
+    total_bookings = Booking.query.count()
+
+    recent_bookings = Booking.query.order_by(Booking.id.desc()).limit(5).all()
+
+    return {
+        "total_treks": total_treks,
+        "total_staff": total_staff,
+        "total_users": total_users,
+        "total_bookings": total_bookings,
+        "recent_bookings": [booking_to_dict(b) for b in recent_bookings],
+    }
 
 
+# ---------------------------------------------------------------------------
+# ADMIN — Manage Treks  (Milestone 3)
+# ---------------------------------------------------------------------------
+@app.route("/admin/treks", methods=["GET"])
+@auth_required("token")
+@roles_required("admin")
+def admin_list_treks():
+    treks = Trek.query.all()
+    return [trek_to_dict(t) for t in treks], 200
+
+
+@app.route("/admin/treks", methods=["POST"])
+@auth_required("token")
+@roles_required("admin")
+def admin_create_trek():
+    data = request.json or {}
+    name = data.get("name")
+    location = data.get("location")
+    difficulty = data.get("difficulty")
+    duration = data.get("duration")
+    available_slots = data.get("available_slots")
+
+    if not all([name, location, difficulty, duration is not None, available_slots is not None]):
+        return {"message": "name, location, difficulty, duration and available_slots are required"}, 400
+
+    trek = Trek(
+        name=name,
+        location=location,
+        difficulty=difficulty,
+        duration=duration,
+        available_slots=available_slots,
+        status="Pending",
+        start_date=datetime.strptime(data["start_date"], "%Y-%m-%d").date() if data.get("start_date") else None,
+        end_date=datetime.strptime(data["end_date"], "%Y-%m-%d").date() if data.get("end_date") else None,
+    )
+    db.session.add(trek)
+    db.session.commit()
+    return {"message": "Trek created successfully", "trek": trek_to_dict(trek)}, 200
+
+
+@app.route("/admin/treks/<int:trek_id>", methods=["PUT"])
+@auth_required("token")
+@roles_required("admin")
+def admin_update_trek(trek_id):
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return {"message": "Trek not found"}, 404
+
+    data = request.json or {}
+
+    for field in ["name", "location", "difficulty", "status"]:
+        if field in data:
+            setattr(trek, field, data[field])
+
+    if "duration" in data:
+        trek.duration = data["duration"]
+    if "available_slots" in data:
+        trek.available_slots = data["available_slots"]
+    if "start_date" in data and data["start_date"]:
+        trek.start_date = datetime.strptime(data["start_date"], "%Y-%m-%d").date()
+    if "end_date" in data and data["end_date"]:
+        trek.end_date = datetime.strptime(data["end_date"], "%Y-%m-%d").date()
+
+    # Assigning staff — validate the target user actually IS staff
+    if "assigned_staff_id" in data:
+        staff_id = data["assigned_staff_id"]
+        if staff_id is None:
+            trek.assigned_staff_id = None
+        else:
+            staff_user = User.query.get(staff_id)
+            if not staff_user or not any(r.name == "staff" for r in staff_user.roles):
+                return {"message": "assigned_staff_id must reference an existing Trek Staff user"}, 400
+            trek.assigned_staff_id = staff_id
+
+    db.session.commit()
+    return {"message": "Trek updated successfully", "trek": trek_to_dict(trek)}, 200
+
+
+@app.route("/admin/treks/<int:trek_id>", methods=["DELETE"])
+@auth_required("token")
+@roles_required("admin")
+def admin_delete_trek(trek_id):
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return {"message": "Trek not found"}, 404
+    db.session.delete(trek)
+    db.session.commit()
+    return {"message": "Trek deleted successfully"}, 200
+
+
+# ---------------------------------------------------------------------------
+# ADMIN — Create & Manage Trek Staff  (Milestone 3)
+# ---------------------------------------------------------------------------
+@app.route("/admin/staff", methods=["GET"])
+@auth_required("token")
+@roles_required("admin")
+def admin_list_staff():
+    staff_role = Role.query.filter_by(name="staff").first()
+    staff_users = staff_role.bearers if staff_role else []
+    result = []
+    for s in staff_users:
+        d = user_to_dict(s)
+        d["experience_years"] = s.staff_profile.experience_years if s.staff_profile else None
+        d["specialization"] = s.staff_profile.specialization if s.staff_profile else None
+        result.append(d)
+    return result, 200
+
+
+@app.route("/admin/staff", methods=["POST"])
+@auth_required("token")
+@roles_required("admin")
+def admin_create_staff():
+    data = request.json or {}
+    name = data.get("name")
+    email = data.get("email")
+    pwd = data.get("password")
+    contact_number = data.get("contact_number")
+    experience_years = data.get("experience_years")
+    specialization = data.get("specialization")
+
+    ds = app.security.datastore
+
+    if not all([name, email, pwd]):
+        return {"message": "name, email and password are required"}, 400
+
+    if ds.find_user(email=email):
+        return {"message": "Email Already Exists"}, 409
+
+    # Same pattern as trekker registration, but role is forced to "staff" and
+    # this endpoint itself is admin-only — matches "Trek Staff: created by
+    # Admin only, no self-registration" from the problem statement.
+    staff_user = ds.create_user(
+        name=name,
+        email=email,
+        password=hash_password(pwd),
+        contact_number=contact_number,
+        active=True,
+        roles=["staff"],
+    )
+    db.session.commit()
+
+    profile = StaffProfile(
+        user_id=staff_user.id,
+        experience_years=experience_years,
+        specialization=specialization,
+    )
+    db.session.add(profile)
+    db.session.commit()
+
+    return {"message": "Trek staff account created successfully"}, 200
+
+
+# ---------------------------------------------------------------------------
+# ADMIN — Manage Users (Trekkers)  (Milestone 3)
+# ---------------------------------------------------------------------------
+@app.route("/admin/users", methods=["GET"])
+@auth_required("token")
+@roles_required("admin")
+def admin_list_users():
+    trekker_role = Role.query.filter_by(name="trekker").first()
+    trekkers = trekker_role.bearers if trekker_role else []
+    return [user_to_dict(u) for u in trekkers], 200
+
+
+# ---------------------------------------------------------------------------
+# ADMIN — Blacklist / Whitelist a Staff or Trekker  (Milestone 3)
+# Deliberately does NOT allow targeting an admin account.
+# ---------------------------------------------------------------------------
+@app.route("/admin/users/<int:user_id>/status", methods=["PUT"])
+@auth_required("token")
+@roles_required("admin")
+def admin_set_user_status(user_id):
+    target = User.query.get(user_id)
+    if not target:
+        return {"message": "User not found"}, 404
+
+    if any(r.name == "admin" for r in target.roles):
+        return {"message": "Cannot blacklist an Admin account"}, 400
+
+    new_status = request.json.get("status")
+    if new_status not in ("active", "blacklisted"):
+        return {"message": "status must be 'active' or 'blacklisted'"}, 400
+
+    target.status = new_status
+    db.session.commit()
+    return {"message": f"User status updated to {new_status}", "user": user_to_dict(target)}, 200
+
+
+# ---------------------------------------------------------------------------
+# ADMIN — Search treks / staff / users  (Milestone 3)
+# ---------------------------------------------------------------------------
+@app.route("/admin/search", methods=["GET"])
+@auth_required("token")
+@roles_required("admin")
+def admin_search():
+    q_type = request.args.get("type")   # "trek" | "staff" | "user"
+    q = (request.args.get("q") or "").lower().strip()
+
+    if q_type == "trek":
+        treks = Trek.query.all()
+        matches = [t for t in treks if q in t.name.lower() or q in str(t.id)]
+        return [trek_to_dict(t) for t in matches], 200
+
+    if q_type == "staff":
+        staff_role = Role.query.filter_by(name="staff").first()
+        staff_users = staff_role.bearers if staff_role else []
+        matches = [s for s in staff_users if q in s.name.lower() or q in s.email.lower() or q in str(s.id)]
+        return [user_to_dict(s) for s in matches], 200
+
+    if q_type == "user":
+        trekker_role = Role.query.filter_by(name="trekker").first()
+        trekkers = trekker_role.bearers if trekker_role else []
+        matches = [u for u in trekkers if q in u.name.lower() or q in u.email.lower() or q in str(u.id)]
+        return [user_to_dict(u) for u in matches], 200
+
+    return {"message": "type must be one of: trek, staff, user"}, 400
+
+
+# ---------------------------------------------------------------------------
+# ADMIN — View all bookings / trekking history  (Milestone 3)
+# ---------------------------------------------------------------------------
+@app.route("/admin/bookings", methods=["GET"])
+@auth_required("token")
+@roles_required("admin")
+def admin_list_bookings():
+    bookings = Booking.query.order_by(Booking.id.desc()).all()
+    return [booking_to_dict(b) for b in bookings], 200
+
+
+# ---------------------------------------------------------------------------
+# STAFF — Dashboard  (Milestone 4)
+# ---------------------------------------------------------------------------
 @app.route("/staff/dashboard", methods=["GET"])
 @auth_required("token")
 @roles_required("staff")
 def staff_dashboard():
-    return {"message": f"Welcome to the staff dashboard, {current_user.name}"}
+    assigned = current_user.assigned_treks
+    total_participants = sum(
+        sum(1 for b in t.bookings if b.booking_status == "Booked") for t in assigned
+    )
+    ongoing = sum(1 for t in assigned if t.status == "Ongoing")
+
+    return {
+        "name": current_user.name,
+        "assigned_trek_count": len(assigned),
+        "total_participants": total_participants,
+        "ongoing_trek_count": ongoing,
+        "treks": [trek_to_dict(t) for t in assigned],
+    }
 
 
+# ---------------------------------------------------------------------------
+# STAFF — Trek Operations  (Milestone 4)
+# Every route below re-checks that the trek is actually assigned to the
+# logged-in staff member — "Ensure only assigned staff can manage their trek".
+# ---------------------------------------------------------------------------
+def _get_own_trek_or_403(trek_id):
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return None, ({"message": "Trek not found"}, 404)
+    if trek.assigned_staff_id != current_user.id:
+        return None, ({"message": "You are not assigned to this trek"}, 403)
+    return trek, None
+
+
+@app.route("/staff/treks/<int:trek_id>", methods=["GET"])
+@auth_required("token")
+@roles_required("staff")
+def staff_get_trek(trek_id):
+    trek, error = _get_own_trek_or_403(trek_id)
+    if error:
+        return error
+
+    participants = [
+        {
+            "booking_id": b.id,
+            "user_id": b.user_id,
+            "name": b.user.name,
+            "email": b.user.email,
+            "booking_date": b.booking_date.isoformat() if b.booking_date else None,
+            "booking_status": b.booking_status,
+        }
+        for b in trek.bookings
+    ]
+
+    result = trek_to_dict(trek)
+    result["participants"] = participants
+    return result, 200
+
+
+@app.route("/staff/treks/<int:trek_id>/slots", methods=["PUT"])
+@auth_required("token")
+@roles_required("staff")
+def staff_update_slots(trek_id):
+    trek, error = _get_own_trek_or_403(trek_id)
+    if error:
+        return error
+
+    new_slots = request.json.get("available_slots")
+    if new_slots is None or new_slots < 0:
+        return {"message": "available_slots must be a non-negative number"}, 400
+
+    trek.available_slots = new_slots
+    db.session.commit()
+    return {"message": "Available slots updated", "trek": trek_to_dict(trek)}, 200
+
+
+@app.route("/staff/treks/<int:trek_id>/status", methods=["PUT"])
+@auth_required("token")
+@roles_required("staff")
+def staff_update_status(trek_id):
+    trek, error = _get_own_trek_or_403(trek_id)
+    if error:
+        return error
+
+    new_status = request.json.get("status")
+    allowed = ("Open", "Closed", "Ongoing", "Completed")
+    if new_status not in allowed:
+        return {"message": f"status must be one of {allowed}"}, 400
+
+    trek.status = new_status
+    db.session.commit()
+    return {"message": f"Trek status updated to {new_status}", "trek": trek_to_dict(trek)}, 200
+
+
+# ---------------------------------------------------------------------------
+# USER (Trekker) — Dashboard  (Milestone 5)
+# ---------------------------------------------------------------------------
 @app.route("/user/dashboard", methods=["GET"])
 @auth_required("token")
 @roles_required("trekker")
 def user_dashboard():
-    return {"message": f"Welcome to your dashboard, {current_user.name}"}
+    available_treks = Trek.query.filter_by(status="Open").limit(6).all()
+    my_bookings = (
+        Booking.query.filter_by(user_id=current_user.id, booking_status="Booked")
+        .order_by(Booking.id.desc())
+        .all()
+    )
+    return {
+        "name": current_user.name,
+        "available_treks": [trek_to_dict(t) for t in available_treks],
+        "my_bookings": [booking_to_dict(b) for b in my_bookings],
+    }
+
+
+# ---------------------------------------------------------------------------
+# USER — Browse / Search Treks  (Milestone 5)
+# Only status == "Open" treks are ever shown to trekkers.
+# ---------------------------------------------------------------------------
+@app.route("/user/treks", methods=["GET"])
+@auth_required("token")
+@roles_required("trekker")
+def user_list_treks():
+    query = Trek.query.filter_by(status="Open")
+
+    difficulty = request.args.get("difficulty")
+    if difficulty:
+        query = query.filter(Trek.difficulty == difficulty)
+
+    location = request.args.get("location")
+    if location:
+        query = query.filter(Trek.location.ilike(f"%{location}%"))
+
+    duration = request.args.get("duration")
+    if duration:
+        query = query.filter(Trek.duration == int(duration))
+
+    treks = query.all()
+    return [trek_to_dict(t) for t in treks], 200
+
+
+@app.route("/user/treks/<int:trek_id>", methods=["GET"])
+@auth_required("token")
+@roles_required("trekker")
+def user_get_trek(trek_id):
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return {"message": "Trek not found"}, 404
+    return trek_to_dict(trek), 200
+
+
+# ---------------------------------------------------------------------------
+# USER — Book a Trek  (Milestone 5 & 6)
+# Enforces, in this order: trek must be Open, must have slots left, and the
+# user must not already hold an active ("Booked") booking for this trek.
+# ---------------------------------------------------------------------------
+@app.route("/user/treks/<int:trek_id>/book", methods=["POST"])
+@auth_required("token")
+@roles_required("trekker")
+def user_book_trek(trek_id):
+    trek = Trek.query.get(trek_id)
+    if not trek:
+        return {"message": "Trek not found"}, 404
+
+    if trek.status != "Open":
+        return {"message": "This trek is not open for booking"}, 400
+
+    # Duplicate-booking check MUST come before the slots check: otherwise, once
+    # a user's own booking consumes the last slot, their second attempt would
+    # be misreported as "No slots available" instead of "already booked".
+    existing = Booking.query.filter_by(
+        user_id=current_user.id, trek_id=trek_id, booking_status="Booked"
+    ).first()
+    if existing:
+        return {"message": "You have already booked this trek"}, 409
+
+    if trek.available_slots <= 0:
+        return {"message": "No slots available for this trek"}, 400
+
+    booking = Booking(
+        user_id=current_user.id,
+        trek_id=trek_id,
+        booking_date=datetime.utcnow().date(),
+        booking_status="Booked",
+        payment_status="Pending",
+    )
+    trek.available_slots -= 1
+    db.session.add(booking)
+    db.session.commit()
+
+    return {"message": "Trek booked successfully", "booking": booking_to_dict(booking)}, 200
+
+
+# ---------------------------------------------------------------------------
+# USER — Cancel a Booking  (Milestone 6)
+# Slot is released back to the trek on cancellation.
+# ---------------------------------------------------------------------------
+@app.route("/user/bookings/<int:booking_id>/cancel", methods=["PUT"])
+@auth_required("token")
+@roles_required("trekker")
+def user_cancel_booking(booking_id):
+    booking = Booking.query.get(booking_id)
+    if not booking or booking.user_id != current_user.id:
+        return {"message": "Booking not found"}, 404
+
+    if booking.booking_status != "Booked":
+        return {"message": f"Cannot cancel a booking that is already {booking.booking_status}"}, 400
+
+    booking.booking_status = "Cancelled"
+    booking.trek.available_slots += 1
+    db.session.commit()
+    return {"message": "Booking cancelled", "booking": booking_to_dict(booking)}, 200
+
+
+# ---------------------------------------------------------------------------
+# USER — Trekking History  (Milestone 6)
+# "Users can access only their own booking/trekking history" — always scoped
+# to current_user.id, never accepts a user_id from the client.
+# ---------------------------------------------------------------------------
+@app.route("/user/history", methods=["GET"])
+@auth_required("token")
+@roles_required("trekker")
+def user_history():
+    bookings = (
+        Booking.query.filter_by(user_id=current_user.id)
+        .order_by(Booking.id.desc())
+        .all()
+    )
+    return [booking_to_dict(b) for b in bookings], 200
+
+
+# ---------------------------------------------------------------------------
+# USER — View / Update Profile  (Milestone 5)
+# ---------------------------------------------------------------------------
+@app.route("/user/profile", methods=["GET"])
+@auth_required("token")
+@roles_required("trekker")
+def user_get_profile():
+    return user_to_dict(current_user), 200
+
+
+@app.route("/user/profile", methods=["PUT"])
+@auth_required("token")
+@roles_required("trekker")
+def user_update_profile():
+    data = request.json or {}
+    if "name" in data and data["name"]:
+        current_user.name = data["name"]
+    if "contact_number" in data:
+        current_user.contact_number = data["contact_number"]
+    db.session.commit()
+    return {"message": "Profile updated", "user": user_to_dict(current_user)}, 200

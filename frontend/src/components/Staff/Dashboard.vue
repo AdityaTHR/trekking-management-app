@@ -1,0 +1,11 @@
+<template>
+    <div class="container mt-5">
+        <h2>Staff Dashboard</h2>
+    </div>
+</template>
+
+<script>
+export default {
+    name: "StaffDashboard"
+}
+</script>
