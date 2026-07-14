@@ -18,11 +18,12 @@ def create_app():
     app.config["SECURITY_PASSWORD_HASH"] = "bcrypt"
     app.config["SECURITY_PASSWORD_SALT"] = "a-fixed-dev-salt-change-me"
 
-    app.config["CACHE_TYPE"] = "redis"
-    app.config["CACHE_REDIS_HOST"] = "localhost"
-    app.config["CACHE_REDIS_PORT"] = 6379
-    app.config["CACHE_REDIS_DB"] = 0
-    app.config["CACHE_REDIS_URL"] = "redis://localhost:6379"
+    # Redis API cache (Milestone 8). Use a separate Redis database from
+    # Celery's broker (DB 0) and result backend (DB 1).
+    app.config["CACHE_TYPE"] = "RedisCache"
+    app.config["CACHE_REDIS_URL"] = "redis://localhost:6379/2"
+    app.config["CACHE_DEFAULT_TIMEOUT"] = 60
+    app.config["CACHE_KEY_PREFIX"] = "trekking-cache:"
 
     db.init_app(app)
     CORS(app)
@@ -45,6 +46,8 @@ def create_app():
 
 
 app, cache = create_app()
+# Make the cache available to route modules without importing app.py again.
+app.cache = cache
 
 # ---------------------------------------------------------------------------
 # Celery + Redis background jobs (Milestone 7)

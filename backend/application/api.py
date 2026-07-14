@@ -63,6 +63,34 @@ def home():
 
 
 # ---------------------------------------------------------------------------
+# Redis caching helpers (Milestone 8)
+# Cache the complete list of open treks once, then apply user filters in
+# Python. Every operation that can change the listing invalidates this key.
+# ---------------------------------------------------------------------------
+OPEN_TREKS_CACHE_KEY = "open-treks"
+OPEN_TREKS_CACHE_TIMEOUT = 60
+
+
+def get_open_treks_cached():
+    cached = app.cache.get(OPEN_TREKS_CACHE_KEY)
+    if cached is not None:
+        return cached, True
+
+    treks = Trek.query.filter_by(status="Open").all()
+    data = [trek_to_dict(trek) for trek in treks]
+    app.cache.set(
+        OPEN_TREKS_CACHE_KEY,
+        data,
+        timeout=OPEN_TREKS_CACHE_TIMEOUT,
+    )
+    return data, False
+
+
+def invalidate_open_treks_cache():
+    app.cache.delete(OPEN_TREKS_CACHE_KEY)
+
+
+# ---------------------------------------------------------------------------
 # AUTH  (Milestone 2)
 # ---------------------------------------------------------------------------
 @app.route("/login", methods=["POST"])
@@ -182,6 +210,7 @@ def admin_create_trek():
     )
     db.session.add(trek)
     db.session.commit()
+    invalidate_open_treks_cache()
     return {"message": "Trek created successfully", "trek": trek_to_dict(trek)}, 200
 
 
@@ -220,6 +249,7 @@ def admin_update_trek(trek_id):
             trek.assigned_staff_id = staff_id
 
     db.session.commit()
+    invalidate_open_treks_cache()
     return {"message": "Trek updated successfully", "trek": trek_to_dict(trek)}, 200
 
 
@@ -232,6 +262,7 @@ def admin_delete_trek(trek_id):
         return {"message": "Trek not found"}, 404
     db.session.delete(trek)
     db.session.commit()
+    invalidate_open_treks_cache()
     return {"message": "Trek deleted successfully"}, 200
 
 
@@ -449,6 +480,7 @@ def staff_update_slots(trek_id):
 
     trek.available_slots = new_slots
     db.session.commit()
+    invalidate_open_treks_cache()
     return {"message": "Available slots updated", "trek": trek_to_dict(trek)}, 200
 
 
@@ -467,6 +499,7 @@ def staff_update_status(trek_id):
 
     trek.status = new_status
     db.session.commit()
+    invalidate_open_treks_cache()
     return {"message": f"Trek status updated to {new_status}", "trek": trek_to_dict(trek)}, 200
 
 
@@ -477,7 +510,7 @@ def staff_update_status(trek_id):
 @auth_required("token")
 @roles_required("trekker")
 def user_dashboard():
-    available_treks = Trek.query.filter_by(status="Open").limit(6).all()
+    available_treks, _ = get_open_treks_cached()
     my_bookings = (
         Booking.query.filter_by(user_id=current_user.id, booking_status="Booked")
         .order_by(Booking.id.desc())
@@ -485,7 +518,7 @@ def user_dashboard():
     )
     return {
         "name": current_user.name,
-        "available_treks": [trek_to_dict(t) for t in available_treks],
+        "available_treks": available_treks[:6],
         "my_bookings": [booking_to_dict(b) for b in my_bookings],
     }
 
@@ -498,22 +531,30 @@ def user_dashboard():
 @auth_required("token")
 @roles_required("trekker")
 def user_list_treks():
-    query = Trek.query.filter_by(status="Open")
+    treks, cache_hit = get_open_treks_cached()
 
     difficulty = request.args.get("difficulty")
     if difficulty:
-        query = query.filter(Trek.difficulty == difficulty)
+        treks = [trek for trek in treks if trek["difficulty"] == difficulty]
 
     location = request.args.get("location")
     if location:
-        query = query.filter(Trek.location.ilike(f"%{location}%"))
+        location = location.lower()
+        treks = [
+            trek for trek in treks
+            if location in trek["location"].lower()
+        ]
 
     duration = request.args.get("duration")
     if duration:
-        query = query.filter(Trek.duration == int(duration))
+        try:
+            duration = int(duration)
+        except ValueError:
+            return {"message": "duration must be an integer"}, 400
+        treks = [trek for trek in treks if trek["duration"] == duration]
 
-    treks = query.all()
-    return [trek_to_dict(t) for t in treks], 200
+    # Helpful during the viva: MISS on the first request, HIT afterwards.
+    return treks, 200, {"X-Cache": "HIT" if cache_hit else "MISS"}
 
 
 @app.route("/user/treks/<int:trek_id>", methods=["GET"])
@@ -564,6 +605,7 @@ def user_book_trek(trek_id):
     trek.available_slots -= 1
     db.session.add(booking)
     db.session.commit()
+    invalidate_open_treks_cache()
 
     return {"message": "Trek booked successfully", "booking": booking_to_dict(booking)}, 200
 
@@ -586,6 +628,7 @@ def user_cancel_booking(booking_id):
     booking.booking_status = "Cancelled"
     booking.trek.available_slots += 1
     db.session.commit()
+    invalidate_open_treks_cache()
     return {"message": "Booking cancelled", "booking": booking_to_dict(booking)}, 200
 
 
