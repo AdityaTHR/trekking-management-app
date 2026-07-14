@@ -35,19 +35,27 @@
             <div class="card-body">
                 <table class="table border align-middle">
                     <thead>
-                        <tr><th>Trek Name</th><th>Booking Date</th><th>Status</th></tr>
+                        <tr><th>Trek Name</th><th>Booking Date</th><th>Status</th><th>Action</th></tr>
                     </thead>
                     <tbody>
                         <tr v-for="b in dashboard.my_bookings" :key="b.id">
                             <td>{{ b.trek_name }}</td>
                             <td>{{ b.booking_date }}</td>
                             <td>{{ b.booking_status }}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-danger" @click="cancelBooking(b.id)">
+                                    Cancel
+                                </button>
+                            </td>
                         </tr>
                         <tr v-if="dashboard.my_bookings && dashboard.my_bookings.length === 0">
-                            <td colspan="3" class="text-center text-muted">No active bookings</td>
+                            <td colspan="4" class="text-center text-muted">No active bookings</td>
                         </tr>
                     </tbody>
                 </table>
+            </div>
+            <div class="card-footer text-end">
+                <router-link to="/user/history">View All Bookings / History →</router-link>
             </div>
         </div>
     </div>
@@ -85,6 +93,13 @@ export default {
             } else {
                 this.message = data.message
             }
+        },
+        async cancelBooking(bookingId) {
+            if (!confirm("Cancel this booking?")) return
+            await fetch(`http://localhost:5000/user/bookings/${bookingId}/cancel`, {
+                method: "PUT", headers: this.authHeaders()
+            })
+            this.loadDashboard()
         }
     },
     mounted() {

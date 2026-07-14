@@ -13,6 +13,7 @@ import StaffDashboard from "./components/Staff/Dashboard.vue"
 import StaffManageTrek from "./components/Staff/ManageTrek.vue"
 import UserDashboard from "./components/User/Dashboard.vue"
 import UserBrowseTreks from "./components/User/BrowseTreks.vue"
+import UserHistory from "./components/User/History.vue"
 import UserProfile from "./components/User/Profile.vue"
 
 const routes = [
@@ -61,7 +62,7 @@ const routes = [
         component: StaffManageTrek
     },
 
-    // Trekker — Milestone 5
+    // Trekker — Milestones 5 and 6
     {
         path: "/user/dashboard",
         component: UserDashboard
@@ -69,6 +70,10 @@ const routes = [
     {
         path: "/user/treks",
         component: UserBrowseTreks
+    },
+    {
+        path: "/user/history",
+        component: UserHistory
     },
     {
         path: "/user/profile",

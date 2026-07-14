@@ -33,6 +33,9 @@
                         <router-link class="nav-link" to="/user/treks">Browse Treks</router-link>
                     </li>
                     <li class="nav-item" v-if="role === 'trekker'">
+                        <router-link class="nav-link" to="/user/history">History</router-link>
+                    </li>
+                    <li class="nav-item" v-if="role === 'trekker'">
                         <router-link class="nav-link" to="/user/profile">Profile</router-link>
                     </li>
                     <li class="nav-item">
