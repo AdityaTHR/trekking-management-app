@@ -15,3 +15,4 @@ Flask-Caching
 redis
 bcrypt
 email-validator
+celery==5.6.3

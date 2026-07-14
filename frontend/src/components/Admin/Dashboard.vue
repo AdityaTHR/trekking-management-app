@@ -2,7 +2,18 @@
     <Navbar></Navbar>
 
     <div class="container mt-4">
-        <h3>Dashboard</h3>
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <h3>Dashboard</h3>
+            <div>
+                <button class="btn btn-outline-secondary btn-sm me-2" @click="triggerReminders" :disabled="jobRunning">
+                    Send Daily Reminders Now
+                </button>
+                <button class="btn btn-outline-secondary btn-sm" @click="triggerReport" :disabled="jobRunning">
+                    Generate Monthly Report Now
+                </button>
+            </div>
+        </div>
+        <div v-if="jobMessage" class="alert alert-info py-2 mt-2">{{ jobMessage }}</div>
 
         <div class="row mt-3 mb-4">
             <div class="col-md-3">
@@ -84,7 +95,9 @@ export default {
                 total_staff: 0,
                 total_bookings: 0,
                 recent_bookings: []
-            }
+            },
+            jobMessage: null,
+            jobRunning: false
         }
     },
     methods: {
@@ -104,6 +117,29 @@ export default {
             catch (error) {
                 console.log(error.message)
             }
+        },
+        async queueAdminJob(url) {
+            this.jobRunning = true
+            this.jobMessage = null
+            try {
+                const response = await fetch(url, {
+                    method: "POST",
+                    headers: { "Authentication-Token": localStorage.getItem("token") }
+                })
+                const data = await response.json()
+                this.jobMessage = data.message || "Unable to queue the job"
+                if (response.status == 401 || response.status == 403) this.$router.push("/login")
+            } catch (error) {
+                this.jobMessage = "Could not contact the backend"
+            } finally {
+                this.jobRunning = false
+            }
+        },
+        triggerReminders() {
+            return this.queueAdminJob("http://localhost:5000/admin/trigger-daily-reminders")
+        },
+        triggerReport() {
+            return this.queueAdminJob("http://localhost:5000/admin/trigger-monthly-report")
         }
     },
     mounted() {

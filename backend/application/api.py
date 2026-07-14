@@ -4,6 +4,12 @@ from .models import db, User, Role, StaffProfile, Trek, Booking
 from flask import request
 from flask_security import auth_required, roles_required, current_user
 from flask_security.utils import hash_password, verify_password
+from celery.result import AsyncResult
+from .task import (
+    export_user_booking_history_csv,
+    generate_monthly_admin_report,
+    send_daily_trek_reminders,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -621,3 +627,48 @@ def user_update_profile():
         current_user.contact_number = data["contact_number"]
     db.session.commit()
     return {"message": "Profile updated", "user": user_to_dict(current_user)}, 200
+
+# ---------------------------------------------------------------------------
+# USER — Trigger asynchronous CSV export of booking history (Milestone 7)
+# ---------------------------------------------------------------------------
+@app.route("/user/export-csv", methods=["GET"])
+@auth_required("token")
+@roles_required("trekker")
+def user_export_csv():
+    task = export_user_booking_history_csv.delay(current_user.id)
+    return {"message": "CSV export queued", "task_id": task.id}, 202
+
+
+# ---------------------------------------------------------------------------
+# ADMIN — Manual triggers for scheduled jobs, useful during demo/viva.
+# ---------------------------------------------------------------------------
+@app.route("/admin/trigger-daily-reminders", methods=["POST"])
+@auth_required("token")
+@roles_required("admin")
+def admin_trigger_daily_reminders():
+    task = send_daily_trek_reminders.delay()
+    return {"message": "Daily reminder job queued", "task_id": task.id}, 202
+
+
+@app.route("/admin/trigger-monthly-report", methods=["POST"])
+@auth_required("token")
+@roles_required("admin")
+def admin_trigger_monthly_report():
+    task = generate_monthly_admin_report.delay()
+    return {"message": "Monthly report job queued", "task_id": task.id}, 202
+
+
+# Poll the result of an asynchronous task. Used by the CSV export button.
+@app.route("/result/<task_id>", methods=["GET"])
+@auth_required("token")
+def get_task_result(task_id):
+    celery_app = app.extensions["celery"]
+    result = AsyncResult(task_id, app=celery_app)
+
+    if result.failed():
+        return {"ready": True, "successful": False, "message": str(result.result)}, 500
+
+    if result.ready():
+        return {"ready": True, "successful": True, "value": result.result}, 200
+
+    return {"ready": False}, 200

@@ -30,7 +30,13 @@
             </p>
         </div>
 
-        <h5 class="mt-4">My Bookings</h5>
+        <div class="d-flex justify-content-between align-items-center mt-4">
+            <h5>My Bookings</h5>
+            <button class="btn btn-outline-secondary btn-sm" @click="exportCsv" :disabled="exporting">
+                {{ exporting ? "Preparing CSV..." : "Export History as CSV" }}
+            </button>
+        </div>
+        <div v-if="exportMessage" class="alert alert-info py-2 mt-2">{{ exportMessage }}</div>
         <div class="card mb-5">
             <div class="card-body">
                 <table class="table border align-middle">
@@ -70,7 +76,10 @@ export default {
     data() {
         return {
             dashboard: { name: "", available_treks: [], my_bookings: [] },
-            message: null
+            message: null,
+            exporting: false,
+            exportMessage: null,
+            csvPollInterval: null
         }
     },
     methods: {
@@ -100,7 +109,53 @@ export default {
                 method: "PUT", headers: this.authHeaders()
             })
             this.loadDashboard()
+        },
+        async exportCsv() {
+            this.exporting = true
+            this.exportMessage = "CSV export has been queued."
+            try {
+                const response = await fetch("http://localhost:5000/user/export-csv", {
+                    headers: this.authHeaders()
+                })
+                const data = await response.json()
+                if (response.status == 202) {
+                    this.csvPollInterval = setInterval(() => this.pollForCsv(data.task_id), 2000)
+                } else {
+                    this.exporting = false
+                    this.exportMessage = data.message || "Could not start CSV export."
+                }
+            } catch (error) {
+                this.exporting = false
+                this.exportMessage = "Could not contact the backend."
+            }
+        },
+        async pollForCsv(taskId) {
+            try {
+                const response = await fetch(`http://localhost:5000/result/${taskId}`, {
+                    headers: this.authHeaders()
+                })
+                const data = await response.json()
+                if (data.ready) {
+                    clearInterval(this.csvPollInterval)
+                    this.csvPollInterval = null
+                    this.exporting = false
+                    if (response.status == 200 && data.successful) {
+                        this.exportMessage = "CSV export is ready. Downloading..."
+                        window.location.href = `http://localhost:5000/static/${data.value}`
+                    } else {
+                        this.exportMessage = data.message || "CSV export failed."
+                    }
+                }
+            } catch (error) {
+                clearInterval(this.csvPollInterval)
+                this.csvPollInterval = null
+                this.exporting = false
+                this.exportMessage = "Could not check CSV export status."
+            }
         }
+    },
+    beforeUnmount() {
+        if (this.csvPollInterval) clearInterval(this.csvPollInterval)
     },
     mounted() {
         this.loadDashboard()

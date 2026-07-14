@@ -46,9 +46,32 @@ def create_app():
 
 app, cache = create_app()
 
-# Celery gets wired in here in the "Backend Jobs" milestone (Celery + Redis),
-# same as the reference app's app.py — left out for now to match our current
-# milestone scope (DB models + Auth only).
+# ---------------------------------------------------------------------------
+# Celery + Redis background jobs (Milestone 7)
+# ---------------------------------------------------------------------------
+from application.celery_init import celery_init_app
+from celery.schedules import crontab
+
+celery = celery_init_app(app)
+
+
+@celery.on_after_configure.connect
+def setup_periodic_tasks(sender, **kwargs):
+    from application.task import send_daily_trek_reminders, generate_monthly_admin_report
+
+    # Daily reminders at 08:00 IST.
+    sender.add_periodic_task(
+        crontab(hour=8, minute=0),
+        send_daily_trek_reminders.s(),
+        name="daily trek reminders",
+    )
+
+    # Monthly activity report on the first day of each month at 06:00 IST.
+    sender.add_periodic_task(
+        crontab(day_of_month=1, hour=6, minute=0),
+        generate_monthly_admin_report.s(),
+        name="monthly admin report",
+    )
 
 from application.api import *
 from application.initial_data import *

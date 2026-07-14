@@ -4,3 +4,8 @@ __pycache__/
 instance/
 .myenv/
 frontend/dist/
+backend/static/*.csv
+
+backend/static/*.csv
+backend/celerybeat-schedule*
+MailHog
