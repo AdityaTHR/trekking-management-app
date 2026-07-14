@@ -4,6 +4,11 @@ import Login from "./components/Login.vue"
 import Register from "./components/Register.vue"
 
 import AdminDashboard from "./components/Admin/Dashboard.vue"
+import AdminManageTreks from "./components/Admin/ManageTreks.vue"
+import AdminManageStaff from "./components/Admin/ManageStaff.vue"
+import AdminManageUsers from "./components/Admin/ManageUsers.vue"
+import AdminSearch from "./components/Admin/Search.vue"
+
 import StaffDashboard from "./components/Staff/Dashboard.vue"
 import UserDashboard from "./components/User/Dashboard.vue"
 
@@ -12,30 +17,42 @@ const routes = [
         path: "/",
         redirect: "/login"
     },
-
     {
         path: "/login",
         component: Login
     },
-
     {
         path: "/register",
         component: Register
     },
 
-    // Admin
+    // Admin — Milestone 3
     {
         path: "/admin/dashboard",
         component: AdminDashboard
     },
+    {
+        path: "/admin/treks",
+        component: AdminManageTreks
+    },
+    {
+        path: "/admin/staff",
+        component: AdminManageStaff
+    },
+    {
+        path: "/admin/users",
+        component: AdminManageUsers
+    },
+    {
+        path: "/admin/search",
+        component: AdminSearch
+    },
 
-    // Staff
+    // Existing Milestone 2 role dashboards
     {
         path: "/staff/dashboard",
         component: StaffDashboard
     },
-
-    // Trekker
     {
         path: "/user/dashboard",
         component: UserDashboard
