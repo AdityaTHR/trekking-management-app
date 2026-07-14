@@ -23,6 +23,9 @@
                     <li class="nav-item" v-if="role === 'admin'">
                         <router-link class="nav-link" to="/admin/search">Search</router-link>
                     </li>
+                    <li class="nav-item" v-if="role === 'staff'">
+                        <router-link class="nav-link" to="/staff/dashboard">My Dashboard</router-link>
+                    </li>
                     <li class="nav-item">
                         <router-link class="nav-link" to="/login" @click="logout">Logout</router-link>
                     </li>

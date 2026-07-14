@@ -10,6 +10,7 @@ import AdminManageUsers from "./components/Admin/ManageUsers.vue"
 import AdminSearch from "./components/Admin/Search.vue"
 
 import StaffDashboard from "./components/Staff/Dashboard.vue"
+import StaffManageTrek from "./components/Staff/ManageTrek.vue"
 import UserDashboard from "./components/User/Dashboard.vue"
 
 const routes = [
@@ -48,11 +49,17 @@ const routes = [
         component: AdminSearch
     },
 
-    // Existing Milestone 2 role dashboards
+    // Staff — Milestone 4
     {
         path: "/staff/dashboard",
         component: StaffDashboard
     },
+    {
+        path: "/staff/treks/:trek_id",
+        component: StaffManageTrek
+    },
+
+    // Trekker — existing Milestone 2 dashboard
     {
         path: "/user/dashboard",
         component: UserDashboard
