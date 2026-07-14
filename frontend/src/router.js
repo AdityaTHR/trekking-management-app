@@ -12,6 +12,8 @@ import AdminSearch from "./components/Admin/Search.vue"
 import StaffDashboard from "./components/Staff/Dashboard.vue"
 import StaffManageTrek from "./components/Staff/ManageTrek.vue"
 import UserDashboard from "./components/User/Dashboard.vue"
+import UserBrowseTreks from "./components/User/BrowseTreks.vue"
+import UserProfile from "./components/User/Profile.vue"
 
 const routes = [
     {
@@ -59,10 +61,18 @@ const routes = [
         component: StaffManageTrek
     },
 
-    // Trekker — existing Milestone 2 dashboard
+    // Trekker — Milestone 5
     {
         path: "/user/dashboard",
         component: UserDashboard
+    },
+    {
+        path: "/user/treks",
+        component: UserBrowseTreks
+    },
+    {
+        path: "/user/profile",
+        component: UserProfile
     }
 ]
 

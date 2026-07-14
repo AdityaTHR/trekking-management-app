@@ -26,6 +26,15 @@
                     <li class="nav-item" v-if="role === 'staff'">
                         <router-link class="nav-link" to="/staff/dashboard">My Dashboard</router-link>
                     </li>
+                    <li class="nav-item" v-if="role === 'trekker'">
+                        <router-link class="nav-link" to="/user/dashboard">Dashboard</router-link>
+                    </li>
+                    <li class="nav-item" v-if="role === 'trekker'">
+                        <router-link class="nav-link" to="/user/treks">Browse Treks</router-link>
+                    </li>
+                    <li class="nav-item" v-if="role === 'trekker'">
+                        <router-link class="nav-link" to="/user/profile">Profile</router-link>
+                    </li>
                     <li class="nav-item">
                         <router-link class="nav-link" to="/login" @click="logout">Logout</router-link>
                     </li>
