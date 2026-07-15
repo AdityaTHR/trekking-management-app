@@ -8,6 +8,7 @@ import AdminManageTreks from "./components/Admin/ManageTreks.vue"
 import AdminManageStaff from "./components/Admin/ManageStaff.vue"
 import AdminManageUsers from "./components/Admin/ManageUsers.vue"
 import AdminSearch from "./components/Admin/Search.vue"
+import AdminBookings from "./components/Admin/Bookings.vue"
 
 import StaffDashboard from "./components/Staff/Dashboard.vue"
 import StaffManageTrek from "./components/Staff/ManageTrek.vue"
@@ -47,6 +48,9 @@ const routes = [
     },
     {
         "path": "/admin/search", component: AdminSearch, meta: { role: "admin" }
+    },
+    {
+        "path": "/admin/bookings", component: AdminBookings, meta: { role: "admin" }
     },
 
     // Staff (Milestone 4)
