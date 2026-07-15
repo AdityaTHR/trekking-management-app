@@ -1,6 +1,6 @@
 <template>
-    <div class="d-flex justify-content-center mt-5">
-        <div class="card" style="width: 20rem;">
+    <div class="auth-page d-flex justify-content-center align-items-center">
+        <div class="card auth-card">
             <div class="card-body">
                 <h5 class="card-title text-center mb-1">Create User Account</h5>
                 <p class="text-center text-muted mb-3" style="font-size: 0.85rem;">Register as a Trekker</p>
@@ -97,3 +97,15 @@ export default {
     }
 }
 </script>
+
+<style scoped>
+.auth-page {
+    min-height: 100vh;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, #eef5ff, #f8fbff);
+}
+
+.auth-card {
+    width: min(100%, 23rem);
+}
+</style>

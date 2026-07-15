@@ -1,7 +1,7 @@
 <template>
-    <div class="d-flex justify-content-center mt-5">
+    <div class="auth-page d-flex justify-content-center align-items-center">
 
-        <div class="card" style="width: 20rem;">
+        <div class="card auth-card">
             <div class="card-body">
                 <h5 class="card-title text-center mb-3">Trekking Management</h5>
 
@@ -84,3 +84,15 @@ export default {
     }
 }
 </script>
+
+<style scoped>
+.auth-page {
+    min-height: 100vh;
+    padding: 1.5rem;
+    background: linear-gradient(135deg, #eef5ff, #f8fbff);
+}
+
+.auth-card {
+    width: min(100%, 23rem);
+}
+</style>

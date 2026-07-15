@@ -1,15 +1,74 @@
 from datetime import datetime
+import re
 from flask import current_app as app
 from .models import db, User, Role, StaffProfile, Trek, Booking
 from flask import request
 from flask_security import auth_required, roles_required, current_user
 from flask_security.utils import hash_password, verify_password
 from celery.result import AsyncResult
-from .task import (
-    export_user_booking_history_csv,
-    generate_monthly_admin_report,
-    send_daily_trek_reminders,
-)
+from sqlalchemy.exc import SQLAlchemyError
+
+from .task import export_user_booking_history_csv, send_daily_trek_reminders, generate_monthly_admin_report
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def safe_commit():
+    """
+    Wrap db.session.commit() so a DB failure never leaks a raw 500 traceback
+    to the client and never leaves the session in a half-committed state.
+    Returns (ok: bool, error_message: str | None).
+    """
+    try:
+        db.session.commit()
+        return True, None
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        app.logger.error(f"Database commit failed: {e}")
+        return False, "Database transaction error occurred"
+
+
+# ---------------------------------------------------------------------------
+# Active blacklist enforcement for users who already hold a valid token.
+# Flask-Security token authentication does not automatically revoke a token
+# when Admin blacklists the account, so the token is checked on every request.
+# ---------------------------------------------------------------------------
+@app.before_request
+def enforce_active_blacklist():
+    token_header = app.config.get("SECURITY_TOKEN_AUTHENTICATION_HEADER", "Authentication-Token")
+    if not request.headers.get(token_header):
+        return None
+
+    user = app.security.login_manager.request_callback(request)
+    if user and getattr(user, "status", None) == "blacklisted":
+        return {"message": "This account has been blacklisted/deactivated"}, 403
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Milestone 8 — Redis caching helpers.
+# The complete open-trek list is cached once; filters are applied in Python.
+# Any write that can change this list invalidates the key.
+# ---------------------------------------------------------------------------
+OPEN_TREKS_CACHE_KEY = "open-treks"
+OPEN_TREKS_CACHE_TIMEOUT = 60
+
+
+def get_open_treks_cached():
+    cached = app.cache.get(OPEN_TREKS_CACHE_KEY)
+    if cached is not None:
+        return cached, True
+
+    treks = Trek.query.filter_by(status="Open").all()
+    data = [trek_to_dict(trek) for trek in treks]
+    app.cache.set(OPEN_TREKS_CACHE_KEY, data, timeout=OPEN_TREKS_CACHE_TIMEOUT)
+    return data, False
+
+
+def invalidate_open_treks_cache():
+    app.cache.delete(OPEN_TREKS_CACHE_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -63,31 +122,26 @@ def home():
 
 
 # ---------------------------------------------------------------------------
-# Redis caching helpers (Milestone 8)
-# Cache the complete list of open treks once, then apply user filters in
-# Python. Every operation that can change the listing invalidates this key.
+# PUBLIC — read-only stats for the pre-login landing page (Milestone: extra)
+# No auth required, and deliberately returns nothing sensitive — just
+# aggregate counts, matching "read-only, no sensitive data" from the spec.
 # ---------------------------------------------------------------------------
-OPEN_TREKS_CACHE_KEY = "open-treks"
-OPEN_TREKS_CACHE_TIMEOUT = 60
+@app.route("/public/stats", methods=["GET"])
+def public_stats():
+    difficulty_counts = {d: 0 for d in ALLOWED_DIFFICULTIES}
+    status_counts = {s: 0 for s in ALLOWED_TREK_STATUSES}
+    for trek in Trek.query.all():
+        if trek.difficulty in difficulty_counts:
+            difficulty_counts[trek.difficulty] += 1
+        if trek.status in status_counts:
+            status_counts[trek.status] += 1
 
-
-def get_open_treks_cached():
-    cached = app.cache.get(OPEN_TREKS_CACHE_KEY)
-    if cached is not None:
-        return cached, True
-
-    treks = Trek.query.filter_by(status="Open").all()
-    data = [trek_to_dict(trek) for trek in treks]
-    app.cache.set(
-        OPEN_TREKS_CACHE_KEY,
-        data,
-        timeout=OPEN_TREKS_CACHE_TIMEOUT,
-    )
-    return data, False
-
-
-def invalidate_open_treks_cache():
-    app.cache.delete(OPEN_TREKS_CACHE_KEY)
+    return {
+        "total_treks": Trek.query.count(),
+        "total_completed_treks": status_counts.get("Completed", 0),
+        "difficulty_distribution": difficulty_counts,
+        "status_distribution": status_counts,
+    }, 200
 
 
 # ---------------------------------------------------------------------------
@@ -120,16 +174,22 @@ def login():
 
 @app.route("/register", methods=["POST"])
 def register():
-    email = request.json.get("email")
-    pwd = request.json.get("password")
-    confirm_pwd = request.json.get("confirm_password")
-    name = request.json.get("name")
+    email = (request.json.get("email") or "").strip().lower()
+    pwd = request.json.get("password") or ""
+    confirm_pwd = request.json.get("confirm_password") or ""
+    name = (request.json.get("name") or "").strip()
     contact_number = request.json.get("contact_number")
 
     ds = app.security.datastore
 
     if not email or not pwd or not name:
         return {"message": "name, email and password are required"}, 400
+
+    if not EMAIL_RE.match(email):
+        return {"message": "Please enter a valid email address"}, 400
+
+    if len(pwd) < 6:
+        return {"message": "Password must be at least 6 characters"}, 400
 
     if pwd != confirm_pwd:
         return {"message": "Passwords do not match"}, 400
@@ -146,7 +206,9 @@ def register():
         active=True,
         roles=["trekker"],
     )
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     return {"message": "Account created successfully"}, 200
 
 
@@ -184,32 +246,98 @@ def admin_list_treks():
     return [trek_to_dict(t) for t in treks], 200
 
 
+ALLOWED_DIFFICULTIES = ("Easy", "Moderate", "Hard")
+ALLOWED_TREK_STATUSES = ("Pending", "Approved", "Open", "Closed", "Ongoing", "Completed")
+
+
+def _coerce_int(value):
+    """Accepts an int, or a numeric string (as sent by plain v-model on
+    <input type="number">, which does NOT cast to Number in Vue 3 unless
+    v-model.number is used). Returns None if it can't be coerced."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def _validate_trek_fields(data, partial=False, existing_trek=None):
+    """Validate and normalize trek payload fields in place."""
+    if (not partial or "name" in data):
+        name = (data.get("name") or "").strip()
+        if not name:
+            return "name cannot be empty"
+        data["name"] = name
+
+    if (not partial or "location" in data):
+        location = (data.get("location") or "").strip()
+        if not location:
+            return "location cannot be empty"
+        data["location"] = location
+
+    if (not partial or "difficulty" in data) and data.get("difficulty") not in ALLOWED_DIFFICULTIES:
+        return f"difficulty must be one of {ALLOWED_DIFFICULTIES}"
+
+    if "status" in data and data["status"] not in ALLOWED_TREK_STATUSES:
+        return f"status must be one of {ALLOWED_TREK_STATUSES}"
+
+    if not partial or "duration" in data:
+        duration = _coerce_int(data.get("duration"))
+        if duration is None or duration <= 0:
+            return "duration must be a positive integer (days)"
+        data["duration"] = duration
+
+    if not partial or "available_slots" in data:
+        slots = _coerce_int(data.get("available_slots"))
+        if slots is None or slots < 0:
+            return "available_slots must be a non-negative integer"
+        data["available_slots"] = slots
+
+    for field in ("start_date", "end_date"):
+        if field in data:
+            raw_value = data.get(field)
+            if raw_value in (None, ""):
+                data[field] = None
+            else:
+                try:
+                    data[field] = datetime.strptime(raw_value, "%Y-%m-%d").date()
+                except (TypeError, ValueError):
+                    return f"{field} must be in YYYY-MM-DD format"
+
+    effective_start = data.get("start_date") if "start_date" in data else getattr(existing_trek, "start_date", None)
+    effective_end = data.get("end_date") if "end_date" in data else getattr(existing_trek, "end_date", None)
+    if effective_start and effective_end and effective_end < effective_start:
+        return "end_date cannot be before start_date"
+
+    return None
+
+
 @app.route("/admin/treks", methods=["POST"])
 @auth_required("token")
 @roles_required("admin")
 def admin_create_trek():
     data = request.json or {}
-    name = data.get("name")
-    location = data.get("location")
-    difficulty = data.get("difficulty")
-    duration = data.get("duration")
-    available_slots = data.get("available_slots")
 
-    if not all([name, location, difficulty, duration is not None, available_slots is not None]):
-        return {"message": "name, location, difficulty, duration and available_slots are required"}, 400
+    error = _validate_trek_fields(data, partial=False)
+    if error:
+        return {"message": error}, 400
 
     trek = Trek(
-        name=name,
-        location=location,
-        difficulty=difficulty,
-        duration=duration,
-        available_slots=available_slots,
+        name=data["name"],
+        location=data["location"],
+        difficulty=data["difficulty"],
+        duration=data["duration"],
+        available_slots=data["available_slots"],
         status="Pending",
-        start_date=datetime.strptime(data["start_date"], "%Y-%m-%d").date() if data.get("start_date") else None,
-        end_date=datetime.strptime(data["end_date"], "%Y-%m-%d").date() if data.get("end_date") else None,
+        start_date=data.get("start_date"),
+        end_date=data.get("end_date"),
     )
     db.session.add(trek)
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     invalidate_open_treks_cache()
     return {"message": "Trek created successfully", "trek": trek_to_dict(trek)}, 200
 
@@ -224,6 +352,10 @@ def admin_update_trek(trek_id):
 
     data = request.json or {}
 
+    error = _validate_trek_fields(data, partial=True, existing_trek=trek)
+    if error:
+        return {"message": error}, 400
+
     for field in ["name", "location", "difficulty", "status"]:
         if field in data:
             setattr(trek, field, data[field])
@@ -232,10 +364,10 @@ def admin_update_trek(trek_id):
         trek.duration = data["duration"]
     if "available_slots" in data:
         trek.available_slots = data["available_slots"]
-    if "start_date" in data and data["start_date"]:
-        trek.start_date = datetime.strptime(data["start_date"], "%Y-%m-%d").date()
-    if "end_date" in data and data["end_date"]:
-        trek.end_date = datetime.strptime(data["end_date"], "%Y-%m-%d").date()
+    if "start_date" in data:
+        trek.start_date = data["start_date"]
+    if "end_date" in data:
+        trek.end_date = data["end_date"]
 
     # Assigning staff — validate the target user actually IS staff
     if "assigned_staff_id" in data:
@@ -248,7 +380,9 @@ def admin_update_trek(trek_id):
                 return {"message": "assigned_staff_id must reference an existing Trek Staff user"}, 400
             trek.assigned_staff_id = staff_id
 
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     invalidate_open_treks_cache()
     return {"message": "Trek updated successfully", "trek": trek_to_dict(trek)}, 200
 
@@ -261,7 +395,9 @@ def admin_delete_trek(trek_id):
     if not trek:
         return {"message": "Trek not found"}, 404
     db.session.delete(trek)
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     invalidate_open_treks_cache()
     return {"message": "Trek deleted successfully"}, 200
 
@@ -289,17 +425,27 @@ def admin_list_staff():
 @roles_required("admin")
 def admin_create_staff():
     data = request.json or {}
-    name = data.get("name")
-    email = data.get("email")
-    pwd = data.get("password")
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    pwd = data.get("password") or ""
     contact_number = data.get("contact_number")
-    experience_years = data.get("experience_years")
-    specialization = data.get("specialization")
+    experience_raw = data.get("experience_years")
+    experience_years = None if experience_raw in (None, "") else _coerce_int(experience_raw)
+    specialization = (data.get("specialization") or "").strip() or None
 
     ds = app.security.datastore
 
     if not all([name, email, pwd]):
         return {"message": "name, email and password are required"}, 400
+
+    if not EMAIL_RE.match(email):
+        return {"message": "Please enter a valid email address"}, 400
+
+    if len(pwd) < 6:
+        return {"message": "Password must be at least 6 characters"}, 400
+
+    if experience_years is not None and experience_years < 0:
+        return {"message": "experience_years must be a non-negative integer"}, 400
 
     if ds.find_user(email=email):
         return {"message": "Email Already Exists"}, 409
@@ -315,15 +461,16 @@ def admin_create_staff():
         active=True,
         roles=["staff"],
     )
-    db.session.commit()
-
-    profile = StaffProfile(
-        user_id=staff_user.id,
-        experience_years=experience_years,
-        specialization=specialization,
+    db.session.add(
+        StaffProfile(
+            user=staff_user,
+            experience_years=experience_years,
+            specialization=specialization,
+        )
     )
-    db.session.add(profile)
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
 
     return {"message": "Trek staff account created successfully"}, 200
 
@@ -360,7 +507,9 @@ def admin_set_user_status(user_id):
         return {"message": "status must be 'active' or 'blacklisted'"}, 400
 
     target.status = new_status
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     return {"message": f"User status updated to {new_status}", "user": user_to_dict(target)}, 200
 
 
@@ -474,12 +623,14 @@ def staff_update_slots(trek_id):
     if error:
         return error
 
-    new_slots = request.json.get("available_slots")
+    new_slots = _coerce_int((request.json or {}).get("available_slots"))
     if new_slots is None or new_slots < 0:
         return {"message": "available_slots must be a non-negative number"}, 400
 
     trek.available_slots = new_slots
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     invalidate_open_treks_cache()
     return {"message": "Available slots updated", "trek": trek_to_dict(trek)}, 200
 
@@ -498,7 +649,9 @@ def staff_update_status(trek_id):
         return {"message": f"status must be one of {allowed}"}, 400
 
     trek.status = new_status
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     invalidate_open_treks_cache()
     return {"message": f"Trek status updated to {new_status}", "trek": trek_to_dict(trek)}, 200
 
@@ -535,25 +688,21 @@ def user_list_treks():
 
     difficulty = request.args.get("difficulty")
     if difficulty:
-        treks = [trek for trek in treks if trek["difficulty"] == difficulty]
+        if difficulty not in ALLOWED_DIFFICULTIES:
+            return {"message": "Invalid difficulty filter"}, 400
+        treks = [t for t in treks if t["difficulty"] == difficulty]
 
-    location = request.args.get("location")
+    location = (request.args.get("location") or "").strip().lower()
     if location:
-        location = location.lower()
-        treks = [
-            trek for trek in treks
-            if location in trek["location"].lower()
-        ]
+        treks = [t for t in treks if location in t["location"].lower()]
 
     duration = request.args.get("duration")
     if duration:
-        try:
-            duration = int(duration)
-        except ValueError:
-            return {"message": "duration must be an integer"}, 400
-        treks = [trek for trek in treks if trek["duration"] == duration]
+        parsed_duration = _coerce_int(duration)
+        if parsed_duration is None or parsed_duration <= 0:
+            return {"message": "duration must be a positive integer"}, 400
+        treks = [t for t in treks if t["duration"] == parsed_duration]
 
-    # Helpful during the viva: MISS on the first request, HIT afterwards.
     return treks, 200, {"X-Cache": "HIT" if cache_hit else "MISS"}
 
 
@@ -562,8 +711,8 @@ def user_list_treks():
 @roles_required("trekker")
 def user_get_trek(trek_id):
     trek = Trek.query.get(trek_id)
-    if not trek:
-        return {"message": "Trek not found"}, 404
+    if not trek or trek.status != "Open":
+        return {"message": "Open trek not found"}, 404
     return trek_to_dict(trek), 200
 
 
@@ -604,7 +753,9 @@ def user_book_trek(trek_id):
     )
     trek.available_slots -= 1
     db.session.add(booking)
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     invalidate_open_treks_cache()
 
     return {"message": "Trek booked successfully", "booking": booking_to_dict(booking)}, 200
@@ -627,7 +778,9 @@ def user_cancel_booking(booking_id):
 
     booking.booking_status = "Cancelled"
     booking.trek.available_slots += 1
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     invalidate_open_treks_cache()
     return {"message": "Booking cancelled", "booking": booking_to_dict(booking)}, 200
 
@@ -664,15 +817,21 @@ def user_get_profile():
 @roles_required("trekker")
 def user_update_profile():
     data = request.json or {}
-    if "name" in data and data["name"]:
-        current_user.name = data["name"]
+    if "name" in data:
+        new_name = (data.get("name") or "").strip()
+        if not new_name:
+            return {"message": "Name cannot be empty"}, 400
+        current_user.name = new_name
     if "contact_number" in data:
         current_user.contact_number = data["contact_number"]
-    db.session.commit()
+    ok, err = safe_commit()
+    if not ok:
+        return {"message": err}, 500
     return {"message": "Profile updated", "user": user_to_dict(current_user)}, 200
 
+
 # ---------------------------------------------------------------------------
-# USER — Trigger asynchronous CSV export of booking history (Milestone 7)
+# USER — Trigger async CSV export of booking history  (Milestone 7c)
 # ---------------------------------------------------------------------------
 @app.route("/user/export-csv", methods=["GET"])
 @auth_required("token")
@@ -683,7 +842,12 @@ def user_export_csv():
 
 
 # ---------------------------------------------------------------------------
-# ADMIN — Manual triggers for scheduled jobs, useful during demo/viva.
+# ADMIN — Manually trigger the two scheduled jobs on demand  (Milestone 7)
+# BETTERMENT over reference app: the reference app only had the periodic
+# schedule (fired every 10 seconds, as a placeholder) with no way to run a
+# job on demand. Waiting for "daily at 08:00" or "1st of next month" isn't
+# practical to demo in a viva, so these let Admin fire either job right now
+# — the underlying task is identical either way.
 # ---------------------------------------------------------------------------
 @app.route("/admin/trigger-daily-reminders", methods=["POST"])
 @auth_required("token")
@@ -701,7 +865,11 @@ def admin_trigger_monthly_report():
     return {"message": "Monthly report job queued", "task_id": task.id}, 202
 
 
-# Poll the result of an asynchronous task. Used by the CSV export button.
+# ---------------------------------------------------------------------------
+# Poll for the result of any async task (currently just CSV export).
+# Frontend polls this every couple seconds, then downloads from
+# /static/<filename> once `ready` is true — same pattern as the reference app.
+# ---------------------------------------------------------------------------
 @app.route("/result/<task_id>", methods=["GET"])
 @auth_required("token")
 def get_task_result(task_id):

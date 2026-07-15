@@ -73,7 +73,10 @@ def generate_monthly_admin_report():
         for t in treks_conducted
     )
 
-    popular_treks = sorted(treks_conducted, key=lambda t: len(t.bookings), reverse=True)[:5]
+    def participant_count(trek):
+        return sum(1 for b in trek.bookings if b.booking_status in ("Booked", "Completed"))
+
+    popular_treks = sorted(treks_conducted, key=participant_count, reverse=True)[:5]
 
     html = prepare_template(
         os.path.join(TEMPLATES_DIR, "admin-monthly-report.html"),
@@ -115,8 +118,19 @@ def export_user_booking_history_csv(user_id):
 
     with open(filepath, "w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(["User ID", "Trek Name", "Location", "Booking Status", "Booking Date"])
+        writer.writerow([
+            "User ID", "Trek Name", "Location", "Booking Status",
+            "Booking Date", "Start Date", "End Date"
+        ])
         for b in bookings:
-            writer.writerow([b.user_id, b.trek.name, b.trek.location, b.booking_status, b.booking_date])
+            writer.writerow([
+                b.user_id,
+                b.trek.name,
+                b.trek.location,
+                b.booking_status,
+                b.booking_date,
+                b.trek.start_date,
+                b.trek.end_date,
+            ])
 
     return filename
